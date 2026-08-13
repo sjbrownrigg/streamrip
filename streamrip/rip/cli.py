@@ -21,6 +21,7 @@ from ..config import DEFAULT_CONFIG_PATH, Config, OutdatedConfigError, set_user_
 from ..console import console
 from ..utils.ssl_utils import get_aiohttp_connector_kwargs
 from .main import Main
+from .prompter import get_prompter
 
 
 def coro(f):
@@ -264,9 +265,37 @@ async def file(ctx, path):
         print_ssl_error_help()
 
 
-@rip.group()
-def config():
+@rip.group(invoke_without_command=True)
+@click.option(
+    "--tidal",
+    help="Log into Tidal. Waits indefinitely; press Ctrl-C to cancel.",
+    is_flag=True,
+)
+@click.pass_context
+@coro
+async def config(ctx, tidal):
     """Manage configuration files."""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    if not tidal:
+        console.print(ctx.get_help())
+        return
+
+    if ctx.obj["config"] is None:
+        return
+
+    with ctx.obj["config"] as cfg:
+        cfg: Config
+        async with Main(cfg) as main:
+            prompter = get_prompter(main.clients["tidal"], cfg)
+            # No deadline: this is an explicit, interactive login, so let the
+            # user take as long as they need rather than failing under them.
+            # Ctrl-C is handled by click, which aborts the whole command.
+            prompter.timeout_s = None
+            await prompter.prompt_and_login()
+            prompter.save()
+            console.print("[green]Successfully logged into Tidal")
 
 
 @config.command("open")
