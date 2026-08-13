@@ -91,36 +91,57 @@ class QobuzPrompter(CredentialPrompter):
 
 
 class TidalPrompter(CredentialPrompter):
-    timeout_s: int = 600  # 5 mins to login
+    # Overall time to allow for login; None waits indefinitely (Ctrl-C to give
+    # up). Tidal expires the device code itself after ~5 minutes, so waiting
+    # longer than one code's lifetime means issuing a *fresh* code and link
+    # rather than polling a dead one -- the previous fixed 10 minute wait spent
+    # its second half polling an already-expired code and then failed with a
+    # bare exception.
+    timeout_s: int | None = 600
     client: TidalClient
 
     def has_creds(self) -> bool:
         return len(self.config.session.tidal.access_token) > 0
 
+    def _timed_out(self, start: float) -> bool:
+        return self.timeout_s is not None and time.time() - start > self.timeout_s
+
     async def prompt_and_login(self):
-        device_code, uri = await self.client._get_device_code()
-        login_link = f"https://{uri}"
-
-        console.print(
-            f"Go to [blue underline]{login_link}[/blue underline] to log into Tidal within 5 minutes.",
-        )
-        launch(login_link)
-
         start = time.time()
-        elapsed = 0.0
-        info = {}
-        while elapsed < self.timeout_s:
-            elapsed = time.time() - start
-            status, info = await self.client._get_auth_status(device_code)
-            if status == 2:
-                # pending
+        info: dict | None = None
+
+        while info is None:
+            device_code, uri, expires_in = await self.client._get_device_code()
+            login_link = f"https://{uri}"
+            console.print(
+                f"Go to [blue underline]{login_link}[/blue underline] to log into Tidal.",
+            )
+            if self.timeout_s is None:
+                console.print(
+                    "[dim]Waiting for you to authorize -- press Ctrl-C to cancel.",
+                )
+            launch(login_link)
+
+            # Stop polling shortly before Tidal expires this code, so we loop
+            # around and print a fresh link instead of a confusing failure.
+            code_deadline = time.time() + max(expires_in - 10, 10)
+            while time.time() < code_deadline:
+                if self._timed_out(start):
+                    raise AuthenticationError("Timed out waiting for Tidal login.")
+                status, resp = await self.client._get_auth_status(device_code)
+                if status == 0:
+                    info = resp
+                    break
+                if status != 2:
+                    raise AuthenticationError(
+                        "Tidal login failed -- the request may have been denied.",
+                    )
                 await asyncio.sleep(4)
-                continue
-            elif status == 0:
-                # successful
-                break
-            else:
-                raise Exception
+
+            if info is None:
+                if self._timed_out(start):
+                    raise AuthenticationError("Timed out waiting for Tidal login.")
+                console.print("[yellow]That link expired. Getting a new one...")
 
         c = self.config.session.tidal
         c.user_id = info["user_id"]  # type: ignore

@@ -307,8 +307,13 @@ class TidalClient(Client):
         c.token_expiry = resp["expires_in"] + time.time()
         self._update_authorization_from_config()
 
-    async def _get_device_code(self) -> tuple[str, str]:
-        """Get the device code that will be used to log in on the browser."""
+    async def _get_device_code(self) -> tuple[str, str, int]:
+        """Get the device code that will be used to log in on the browser.
+
+        Returns (device_code, verification_uri, seconds_until_expiry). Tidal
+        expires the code on its own (~5 minutes), so the caller needs to know
+        when to stop polling it and request a fresh one.
+        """
         if not hasattr(self, "session"):
             self.session = await self.get_session()
 
@@ -321,7 +326,11 @@ class TidalClient(Client):
         if resp.get("status", 200) != 200:
             raise Exception(f"Device authorization failed {resp}")
 
-        return resp["deviceCode"], resp["verificationUriComplete"]
+        return (
+            resp["deviceCode"],
+            resp["verificationUriComplete"],
+            int(resp.get("expiresIn", 300)),
+        )
 
     # ---------- API Request Utilities ---------------
 
